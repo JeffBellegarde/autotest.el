@@ -56,33 +56,101 @@
   :group 'autotest
   :type '(string))
 
+(defvar autotest-status-regexp "[[:digit:]]+ examples, \\([[:digit:]]+\\) failure.*$")
+(defvar autotest-start-regexp "/bin/rspec .*$")
+
+(defun autotest-clear-before-start ()
+  (save-excursion
+    (goto-char (point-max))
+    (if (re-search-backward autotest-start-regexp (point-min) t)
+	(delete-region (point-min) (match-beginning 0)))))
+
+(defun autotest-find-status ()
+ (save-excursion
+   (goto-char (point-max))
+   (re-search-backward autotest-status-regexp (point-min) t)))
+
+(defun autotest-find-start ()
+ (save-excursion
+   (goto-char (point-max))
+   (re-search-backward autotest-start-regexp (point-min) t)))
+
+(defun autotest-find-status-pos ()
+  (if (autotest-find-status)
+      (match-beginning 0)
+    0))
+
+(defun autotest-find-start-pos ()
+  (if (autotest-find-start)
+      (match-beginning 0)
+    0))
+
+(defun autotest-status-filter (output)
+  (if (> (autotest-find-start-pos) (autotest-find-status-pos))
+      (autotest-update 'running)
+    (autotest-update (if (equal (match-string 1) "0")
+			 'passed
+		       'failed))
+    (autotest-clear-before-start)))
+
+(defun autotest-status-filter2 (output)
+  (save-excursion
+    (goto-char (point-max))
+    (if (re-search-backward autotest-status-regexp (point-min) t)
+	(progn
+	  (autotest-update (if (equal (match-string 1) "0")
+			       'passed
+			     'failed))
+	  (if (re-search-backward autotest-status-regexp (point-min) t)
+	      (delete-region (point-min) (match-end 0))))
+      (autotest-clear))))
+
+(defun autotest-clear ()
+  (autotest-update 'quit))
+
+(defun get-above-autotest () (expand-file-name
+	   ".autotest" (loop as d = default-directory then (expand-file-name
+	   ".." d) if (file-exists-p (expand-file-name ".autotest" d)) return
+	   d)))
+
 (defun autotest ()
   "Fire up an instance of autotest in its own buffer with shell bindings and compile-mode highlighting and linking."
   (interactive)
   (let ((buffer (shell "*autotest*")))
-
+    (add-hook 'kill-buffer-hook 'autotest-clear nil t)
     (define-key shell-mode-map "\C-c\C-a" 'autotest-switch)
 
     (set (make-local-variable 'comint-output-filter-functions)
 	 '(comint-truncate-buffer
 	   comint-postoutput-scroll-to-bottom
+	   autotest-status-filter
 	   ansi-color-process-output
 	   ))
     (set (make-local-variable 'comint-buffer-maximum-size) 5000)
     (set (make-local-variable 'comint-scroll-show-maximum-output) t)
     (set (make-local-variable 'comint-scroll-to-bottom-on-output) t)
 
-    (set (make-local-variable 'compilation-error-regexp-alist)
+    ;(set (make-local-variable 'compilation-error-regexp-alist)
+    ;     '(
+    ;       ("^ +\\(#{RAILS_ROOT}/\\)?\\([^(:]+\\):\\([0-9]+\\)" 2 3)
+    ;       ("\\[\\(.*\\):\\([0-9]+\\)\\]:$" 1 2)
+    ;       ("^ # *\\([[+]\\)?\\([^:
+;]+\\):\\([0-9]+\\):" 2 3)
+;           ("^.* at \\([^:]*\\):\\([0-9]+\\)$" 1 2)
+;           ))
+
+   (set (make-local-variable 'compilation-error-regexp-alist)
          '(
-           ("^ +\\(#{RAILS_ROOT}/\\)?\\([^(:]+\\):\\([0-9]+\\)" 2 3)
-           ("\\[\\(.*\\):\\([0-9]+\\)\\]:$" 1 2)
-           ("^ *\\([[+]\\)?\\([^:
-]+\\):\\([0-9]+\\):" 2 3)
-           ("^.* at \\([^:]*\\):\\([0-9]+\\)$" 1 2)
+           ;("^ # +/?\\([^:]+\\):\\([0-9]+\\):in " 1 2)
+           ("^ +# \\([^: ]+\\):\\([0-9]+\\)" 1 2)
+           ;("\\[/?\\(.*\\):\\([0-9]+\\)\\]:$" 1 2)
+           ;("On line #\\([0-9]+\\) of \\(.*\\)$" 2 1)
            ))
     (ansi-color-for-comint-mode-on)
-    (compilation-shell-minor-mode)
-    (comint-send-string buffer (concat autotest-command "\n"))))
+    (compilation-shell-minor-mode 1)
+    (set 'default-directory (expand-file-name ".." (get-above-autotest)))
+    (comint-send-string buffer (concat "cd " default-directory " && " autotest-command "\n"))
+    ))
 
 (defun autotest-switch ()
   "Switch back and forth between autotest and the previous buffer"
@@ -101,23 +169,24 @@
       (setq unit-test-colours (acons "dark-gray" "#666666" unit-test-colours))
       (setq unit-test-running-xpm (unit-test-dot "gray"))
       (server-start)
-      (defun autotest-update (status)
-        "Updates all buffer's modeline with the current test status."
-        (interactive "S")
-        (let ((autotest-map (make-sparse-keymap)))
-          (define-key autotest-map [mode-line mouse-1] 'autotest-switch)
-          (mapcar (lambda (buffer)
-                    (with-current-buffer buffer
-                      (if (eq status 'quit)
-                          (show-test-none)
-                        (progn
-                          (show-test-status status)
-                          (put-text-property
-                           0 3
-                           'keymap autotest-map
-                           (car mode-line-buffer-identification))))))
-                  (remove-if 'minibufferp (buffer-list))))
-        status))
-  (message "unit-test not found, not starting autotest/emacs integration"))
+      (message "unit-test not found, not starting autotest/emacs integration")))
+
+(defun autotest-update (status)
+  "Updates all buffer's modeline with the current test status."
+  (interactive "S")
+  (let ((autotest-map (make-sparse-keymap)))
+    (define-key autotest-map [mode-line mouse-1] 'autotest-switch)
+    (mapcar (lambda (buffer)
+	      (with-current-buffer buffer
+		(if (eq status 'quit)
+		    (show-test-none)
+		  (progn
+		    (show-test-status status)
+		    (put-text-property
+		     0 3
+		     'keymap autotest-map
+		     (car mode-line-buffer-identification))))))
+	    (remove-if 'minibufferp (buffer-list))))
+  status)
 
 (provide 'autotest)
